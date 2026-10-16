@@ -812,9 +812,7 @@ int kfd_dispatch_log_target_check_auth(struct kfd_process *target, u32 gpu_id,
 				       struct kfd_node *node)
 {
 	struct task_struct *lead = target->lead_thread;
-	struct user_namespace *tcred_ns;
-	struct mm_struct *mm;
-	bool creds_match;
+	int ret;
 
 	if (!lead)
 		return -ESRCH;
@@ -833,13 +831,34 @@ int kfd_dispatch_log_target_check_auth(struct kfd_process *target, u32 gpu_id,
 	if (perfmon_capable())
 		return 0;
 
+	ret = kfd_task_ptrace_creds_check(lead);
+	if (ret == -EPERM)
+		pr_warn_ratelimited("kfd profiler: dlog OPEN_STREAM denied by cross-process auth: target_tgid=%d caller_uid=%u gpu=%u\n",
+				    task_pid_nr(lead), __kuid_val(current_uid()),
+				    (unsigned int)gpu_id);
+	return ret;
+}
+
+/*
+ * Inlines the credential and dumpability parts of __ptrace_may_access() with
+ * REALCREDS semantics (identical for READ and ATTACH modes). Modules cannot
+ * call ptrace_may_access()/the LSM ptrace hook, so Yama ptrace_scope and other
+ * LSM policy are NOT honored. Returns 0, -EPERM, or -ESRCH if @task has no mm.
+ */
+int kfd_task_ptrace_creds_check(struct task_struct *task)
+{
+	struct user_namespace *tcred_ns;
+	struct mm_struct *mm;
+	bool creds_match;
+	int ret = -EPERM;
+
 	/*
 	 * REALCREDS: caller's REAL uid/gid vs ALL THREE of the target's
 	 * {uid,euid,suid}/{gid,egid,sgid}; pin user_ns for the fallback below.
 	 */
 	rcu_read_lock();
 	{
-		const struct cred *tcred = __task_cred(lead);
+		const struct cred *tcred = __task_cred(task);
 		const struct cred *cred = current_cred();
 
 		tcred_ns = get_user_ns(tcred->user_ns);
@@ -853,7 +872,7 @@ int kfd_dispatch_log_target_check_auth(struct kfd_process *target, u32 gpu_id,
 	rcu_read_unlock();
 
 	if (!creds_match && !ns_capable(tcred_ns, CAP_SYS_PTRACE))
-		goto deny;
+		goto out;
 
 	/* Order the cred read before the dumpable read (pairs commit_creds()). */
 	smp_rmb();
@@ -862,7 +881,7 @@ int kfd_dispatch_log_target_check_auth(struct kfd_process *target, u32 gpu_id,
 	 * Dumpability gate: a non-dumpable target needs CAP_SYS_PTRACE in the
 	 * TARGET MM's user_ns (not the cred user_ns).
 	 */
-	mm = get_task_mm(lead);
+	mm = get_task_mm(task);
 	if (!mm) {
 		put_user_ns(tcred_ns);
 		return -ESRCH;
@@ -870,19 +889,14 @@ int kfd_dispatch_log_target_check_auth(struct kfd_process *target, u32 gpu_id,
 	if (get_dumpable(mm) != SUID_DUMP_USER &&
 	    !ns_capable(mm->user_ns, CAP_SYS_PTRACE)) {
 		mmput(mm);
-		goto deny;
+		goto out;
 	}
 	mmput(mm);
-	put_user_ns(tcred_ns);
+	ret = 0;
 
-	return 0;
-
-deny:
+out:
 	put_user_ns(tcred_ns);
-	pr_warn_ratelimited("kfd profiler: dlog OPEN_STREAM denied by cross-process auth: target_tgid=%d caller_uid=%u gpu=%u\n",
-			    task_pid_nr(lead), __kuid_val(current_uid()),
-			    (unsigned int)gpu_id);
-	return -EPERM;
+	return ret;
 }
 
 /* Clear the dispatch-log fields from a queue's MQD/HQD. */

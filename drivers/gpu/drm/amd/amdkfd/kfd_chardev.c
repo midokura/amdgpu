@@ -3591,6 +3591,56 @@ static int kfd_ioctl_create_process(struct file *filep, struct kfd_process *p, v
 	return 0;
 }
 
+static int kfd_ioctl_set_mmap_target(struct file *filep,
+				     struct kfd_process *p, void *data)
+{
+	struct kfd_ioctl_set_mmap_target_args *args = data;
+	struct mm_struct *new_mm = NULL, *old_mm;
+	struct task_struct *task;
+	struct pid *pid;
+	int ret;
+
+	if (args->flags)
+		return -EINVAL;
+
+	if (args->pid) {
+		pid = find_get_pid(args->pid);
+		if (!pid)
+			return -ESRCH;
+		task = get_pid_task(pid, PIDTYPE_TGID);
+		put_pid(pid);
+		if (!task)
+			return -ESRCH;
+
+		ret = kfd_task_ptrace_creds_check(task);
+		if (!ret) {
+			new_mm = get_task_mm(task);
+			if (new_mm) {
+				mmgrab(new_mm);
+				mmput(new_mm);
+			} else {
+				ret = -ESRCH;
+			}
+		}
+		put_task_struct(task);
+		if (ret)
+			return ret;
+	}
+
+	spin_lock(&p->mmap_target_lock);
+	old_mm = p->mmap_target_mm;
+	p->mmap_target_mm = new_mm;
+	spin_unlock(&p->mmap_target_lock);
+
+	if (old_mm)
+		mmdrop(old_mm);
+
+	dev_dbg(kfd_device, "pid %d set mmap target to tgid %u\n",
+		p->lead_thread->pid, args->pid);
+
+	return 0;
+}
+
 static inline int profile_lock_device(struct kfd_process *p,
 					   uint32_t gpu_id, uint32_t op)
 {
@@ -3982,6 +4032,9 @@ static const struct amdkfd_ioctl_desc amdkfd_ioctls[] = {
 	AMDKFD_IOCTL_DEF(AMDKFD_IOC_PC_SAMPLE,
 			kfd_ioctl_pc_sample, 0),
 
+	AMDKFD_IOCTL_DEF(AMDKFD_IOC_SET_MMAP_TARGET,
+			kfd_ioctl_set_mmap_target, 0),
+
 	AMDKFD_IOCTL_DEF(AMDKFD_IOC_AIS_OP,
 			kfd_ioctl_ais, 0),
 };
@@ -4173,6 +4226,21 @@ static int kfd_mmio_mmap(struct kfd_node *dev, struct kfd_process *process,
 				vma->vm_page_prot);
 }
 
+/*
+ * The context owner may name one other address space (AMDKFD_IOC_SET_MMAP_TARGET)
+ * that can receive the plain /dev/kfd mappings: doorbell and MMIO pages.
+ */
+static bool kfd_mmap_target_allowed(struct kfd_process *p, struct mm_struct *mm)
+{
+	bool allowed;
+
+	spin_lock(&p->mmap_target_lock);
+	allowed = p->mmap_target_mm && p->mmap_target_mm == mm;
+	spin_unlock(&p->mmap_target_lock);
+
+	return allowed;
+}
+
 static int kfd_mmap(struct file *filep, struct vm_area_struct *vma)
 {
 	struct kfd_process *process;
@@ -4185,7 +4253,8 @@ static int kfd_mmap(struct file *filep, struct vm_area_struct *vma)
 	if (!process)
 		return -ESRCH;
 
-	if (process->lead_thread != current->group_leader)
+	if (process->lead_thread != current->group_leader &&
+	    !kfd_mmap_target_allowed(process, vma->vm_mm))
 		return -EBADF;
 
 	mmap_offset = vma->vm_pgoff << PAGE_SHIFT;

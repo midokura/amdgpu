@@ -1429,6 +1429,9 @@ static void kfd_process_wq_release(struct work_struct *work)
 
 	mutex_destroy(&p->mutex);
 
+	if (p->mmap_target_mm)
+		mmdrop(p->mmap_target_mm);
+
 	put_task_struct(p->lead_thread);
 
 	kfree(p);
@@ -1847,6 +1850,7 @@ struct kfd_process *create_process(const struct task_struct *thread, bool primar
 
 	kref_init(&process->ref);
 	mutex_init(&process->mutex);
+	spin_lock_init(&process->mmap_target_lock);
 	process->mm = thread->mm;
 	process->lead_thread = thread->group_leader;
 	process->n_pdds = 0;

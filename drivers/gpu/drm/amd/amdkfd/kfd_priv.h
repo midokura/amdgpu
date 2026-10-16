@@ -1255,6 +1255,16 @@ struct kfd_process {
 	 * profiler OPEN_STREAM cannot install a session on a torn-down target.
 	 */
 	bool dlog_teardown;
+
+	/*
+	 * Address space, other than the owner's, that may mmap this context's
+	 * /dev/kfd doorbell and MMIO pages (AMDKFD_IOC_SET_MMAP_TARGET). Held
+	 * with mmgrab() so the pointer cannot be reused while stored. Protected
+	 * by @mmap_target_lock, a spinlock because kfd_mmap() runs under the
+	 * mmap_lock.
+	 */
+	spinlock_t mmap_target_lock;
+	struct mm_struct *mmap_target_mm;
 };
 
 #define KFD_PROCESS_TABLE_SIZE 8 /* bits: 256 entries */
@@ -1656,6 +1666,11 @@ int pqm_enable_dispatch_log_stream(struct kfd_process *target, u32 gpu_id,
 int pqm_disable_dispatch_log_stream(struct kfd_process *target, u32 gpu_id,
 			struct kfd_dlog_stream *stream);
 void kfd_dispatch_log_release_process(struct kfd_process *target);
+/*
+ * ptrace-style credential and dumpability check of current against @task.
+ * Does not consult LSM ptrace policy (not callable from modules).
+ */
+int kfd_task_ptrace_creds_check(struct task_struct *task);
 /* Fail-closed cross-process auth, enforced before pinning; 0 if allowed. */
 int kfd_dispatch_log_target_check_auth(struct kfd_process *target, u32 gpu_id,
 				       struct kfd_node *node);

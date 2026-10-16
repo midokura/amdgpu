@@ -1872,6 +1872,30 @@ struct kfd_ioctl_ais_args {
 	};
 };
 
+/**
+ * Arguments for AMDKFD_IOC_SET_MMAP_TARGET
+ *
+ * Lets the owner of a KFD context name one other process whose address space
+ * may receive /dev/kfd mmaps (doorbell and MMIO pages) for this context. The
+ * named process can only mmap; it still cannot issue ioctls on the fd. A
+ * later call replaces the target; @pid == 0 clears it. Mappings already made
+ * in a previous target are not revoked.
+ *
+ * The caller must have ptrace-style credentials over the target (matching
+ * real uid/gid, or CAP_SYS_PTRACE, and a dumpable target). LSM ptrace policy
+ * such as Yama is not consulted.
+ *
+ * VRAM/GTT buffers are mapped through the DRM render node, which is checked
+ * per drm_file rather than per process, so they need no grant here.
+ *
+ * @pid:   thread-group id of the target in the caller's pid namespace, or 0
+ * @flags: must be 0
+ */
+struct kfd_ioctl_set_mmap_target_args {
+	__u32 pid;	/* to KFD */
+	__u32 flags;	/* to KFD */
+};
+
 /* Dispatch-log profiler stream (anon_inode fd; KFD-owned GTT BO, RAW mmap) */
 #define KFD_DLOG_STREAM_ABI_VERSION		3
 #define KFD_DISPATCH_LOG_FW_RECORD_BYTES	20U
@@ -2090,6 +2114,9 @@ struct kfd_dlog_stream_args {
 
 #define AMDKFD_IOC_PC_SAMPLE		\
 		AMDKFD_IOWR(0x85, struct kfd_ioctl_pc_sample_args)
+
+#define AMDKFD_IOC_SET_MMAP_TARGET		\
+		AMDKFD_IOW(0x86, struct kfd_ioctl_set_mmap_target_args)
 
 #define AMDKFD_IOC_AIS_OP			\
 		AMDKFD_IOWR(0x87, struct kfd_ioctl_ais_args)
